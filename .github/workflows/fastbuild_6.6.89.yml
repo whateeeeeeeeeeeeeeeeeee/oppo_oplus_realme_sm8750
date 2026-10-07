@@ -90,6 +90,11 @@ on:
         required: true
         type: boolean
         default: 'false'
+      wifi_drivers_enable:
+        description: '是否编译外置USB无线网卡驱动(RTL8188EU/AR9271/MT7601U等，编成模块不刷内核，需配合Magisk模块加载)'
+        required: true
+        type: boolean
+        default: 'false'
       kernel_suffix:
         description: '内核后缀(留空默认,开头别加连字符,勿加空格等影响指令运行的保留字符)'
         required: false
@@ -512,6 +517,37 @@ jobs:
             fi
           fi
 
+      - name: 启用外置USB无线网卡驱动 (仅编模块，不改内核ABI)
+        if: inputs.wifi_drivers_enable
+        run: |
+          set -u
+          echo "=========================================================="
+          echo "  外置 USB 无线网卡驱动 (模块方式，不触碰内核 ABI)"
+          echo "=========================================================="
+          cd kernel_workspace/common
+          DB=./arch/arm64/configs/gki_defconfig
+          add() { for k in "$@"; do echo "CONFIG_${k}=m" >> "$DB"; done; }
+
+          # 关键：CFG80211/MAC80211 由固件提供 .ko，此处【不启用】
+          # 只启用网卡驱动本身，编成模块
+          echo ">>> 启用 WLAN 框架与 Realtek 驱动（模块）"
+          add WLAN WLAN_VENDOR_REALTEK
+          add RTL8XXXU RTL8XXXU_UNTESTED
+
+          echo ">>> 附加：其他常见渗透网卡驱动（模块）"
+          add WLAN_VENDOR_ATH ATH9K_HTC
+          add WLAN_VENDOR_RALINK
+          add WLAN_VENDOR_MEDIATEK MT7601U
+          add WLAN_VENDOR_ZYDAS USB_ZD1201
+          add RTL8187 EEPROM_93CX6
+
+          echo ">>> 校验写入:"
+          for k in RTL8XXXU ATH9K_HTC MT7601U RTL8187 USB_ZD1201; do
+            grep -qE "^CONFIG_${k}=m" "$DB" && echo "    [OK] CONFIG_${k}=m" || echo "    [MISS] ${k}"
+          done
+          echo ">>> 注意: CFG80211/MAC80211 保持关闭，由固件模块提供"
+          grep -E '^# CONFIG_CFG80211|^CONFIG_CFG80211' "$DB" | head -1 | sed 's/^/    /'
+
       - name: 启用ADIOS IO调度器
         if: inputs.adios_enable
         run: |
@@ -631,6 +667,26 @@ jobs:
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig &&
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
           
+          # 同时编译模块（用于外置网卡驱动）
+          if [[ "${{ github.event.inputs.wifi_drivers_enable }}" == "true" ]]; then
+            echo ">>> 正在编译内核模块..."
+            make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+                 CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld \
+                 O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error modules || true
+            echo ">>> 收集网卡驱动模块:"
+            mkdir -p "$WORKDIR/wifi_modules"
+            for m in rtl8xxxu ath9k_htc mt7601u rtl8187 zd1201; do
+              f=$(find out -name "${m}.ko" 2>/dev/null | head -1)
+              if [ -n "$f" ]; then
+                cp "$f" "$WORKDIR/wifi_modules/"
+                echo "    [OK] $m.ko ($(stat -c%s "$f") bytes)"
+              else
+                echo "    [MISS] $m.ko 未生成"
+              fi
+            done
+            ls -la "$WORKDIR/wifi_modules/" || true
+          fi
+          
           # 编译后时间劫持二次校验
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
           echo "--- 编译后环境文件时间戳: ---"
@@ -737,6 +793,53 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           path: ${{ github.workspace }}/kernel_workspace/AnyKernel*.zip
+          archive: false
+
+      - name: 打包网卡驱动模块为 Magisk 模块
+        if: inputs.wifi_drivers_enable
+        run: |
+          cd "${{ github.workspace }}/kernel_workspace"
+          if [ ! -d wifi_modules ] || [ -z "$(ls -A wifi_modules 2>/dev/null)" ]; then
+            echo "::warning::没有生成任何网卡驱动模块，跳过"
+            exit 0
+          fi
+          MODDIR=AnyKernel3_wifi_modules
+          rm -rf $MODDIR && mkdir -p $MODDIR/system/lib/modules
+          cp wifi_modules/*.ko $MODDIR/system/lib/modules/ 2>/dev/null || true
+
+          # Magisk 模块配置
+          cat > $MODDIR/module.prop <<'PROP'
+          id=wifi_usb_drivers
+          name=USB WiFi Drivers (NetHunter)
+          version=1.0
+          versionCode=1
+          author=cctv18-kernel-fusion
+          description=外置USB无线网卡驱动: RTL8188EU(rTL8xxxu) / AR9271(ath9k_htc) / MT7601U / RTL8187 / ZD1201. 依赖固件的 cfg80211/mac80211 模块.
+          PROP
+
+          # post-fs-data.sh: 开机加载模块
+          cat > $MODDIR/post-fs-data.sh <<'SH'
+          #!/system/bin/sh
+          MODDIR=${0%/*}
+          for ko in $MODDIR/system/lib/modules/*.ko; do
+            [ -f "$ko" ] || continue
+            insmod "$ko" 2>/dev/null && log -t wifi_drivers "loaded $(basename $ko)" || log -t wifi_drivers "failed $(basename $ko)"
+          done
+          SH
+          chmod 755 $MODDIR/post-fs-data.sh
+
+          # 打包
+          cd $MODDIR && zip -r ../AnyKernel3_wifi_modules.zip ./* >/dev/null
+          cd ..
+          echo "✅ Magisk 模块已打包:"
+          ls -la AnyKernel3_wifi_modules.zip
+          unzip -l AnyKernel3_wifi_modules.zip
+
+      - name: 上传网卡驱动模块
+        if: inputs.wifi_drivers_enable
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ github.workspace }}/kernel_workspace/AnyKernel3_wifi_modules.zip
           archive: false
 
   release:
