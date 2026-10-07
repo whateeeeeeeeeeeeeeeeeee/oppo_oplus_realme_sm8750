@@ -90,6 +90,16 @@ on:
         required: true
         type: boolean
         default: 'false'
+      nethunter_enable:
+        description: '是否启用 NetHunter 渗透测试支持(HID注入/外置无线网卡/蓝牙攻击/SDR/CAN; 与Droidspaces共存)'
+        required: true
+        type: boolean
+        default: 'true'
+      nethunter_wifi_stack:
+        description: 'NetHunter是否包含802.11协议栈与外置网卡驱动(开启才支持外接无线网卡与监听注入; 若刷入后无法开机请改为false重编,仅保留HID/蓝牙/SDR)'
+        required: true
+        type: boolean
+        default: 'true'
       kernel_suffix:
         description: '内核后缀(留空默认,开头别加连字符,勿加空格等影响指令运行的保留字符)'
         required: false
@@ -537,6 +547,127 @@ jobs:
           curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
+      - name: 启用 NetHunter 渗透测试内核支持
+        if: inputs.nethunter_enable
+        run: |
+          set -u
+          echo "=========================================================="
+          echo "   NetHunter 支持层 —— 与 Droidspaces 容器能力共存"
+          echo "=========================================================="
+          cd kernel_workspace/common
+          DB=./arch/arm64/configs/gki_defconfig
+          add() { for k in "$@"; do echo "CONFIG_${k}=y" >> "$DB"; done; }
+
+          echo ">>> [1/7] 802.11 协议栈 (外置无线网卡的前提)"
+          # 注意: 必须内建 =y，编成模块会与 OEM 符号 CRC 冲突
+          # (mac80211: disagrees about version of symbol wiphy_new_nm)
+          add WLAN WIRELESS WIRELESS_EXT WEXT_CORE WEXT_PROC WEXT_SPY WEXT_PRIV \
+              CFG80211 CFG80211_WEXT CFG80211_WEXT_EXPORT CFG80211_DEFAULT_PS \
+              MAC80211 MAC80211_MESH MAC80211_LEDS MAC80211_RC_MINSTREL \
+              RFKILL RFKILL_INPUT RFKILL_LEDS
+
+          echo ">>> [2/7] USB 外置无线网卡驱动 (内建; 本构建不产出 .ko)"
+          add WLAN_VENDOR_REALTEK WLAN_VENDOR_ATH WLAN_VENDOR_RALINK \
+              WLAN_VENDOR_MEDIATEK WLAN_VENDOR_ZYDAS
+          add RTL8XXXU RTL8XXXU_UNTESTED
+          add RTL8187 RTL8187_LEDS EEPROM_93CX6
+          add ATH9K_HTC ATH9K_HTC_DEBUGFS
+          add MT7601U USB_ZD1201
+
+          echo ">>> [3/7] USB HID gadget —— BadUSB / 键盘注入 / RNDIS"
+          add USB_GADGET USB_CONFIGFS CONFIGFS_FS
+          add USB_CONFIGFS_F_HID USB_CONFIGFS_F_FS USB_CONFIGFS_F_MIDI
+          add USB_CONFIGFS_F_UAC1 USB_CONFIGFS_F_UAC2 USB_CONFIGFS_F_UVC
+          add USB_CONFIGFS_F_PRINTER
+          add USB_CONFIGFS_SERIAL USB_CONFIGFS_ACM USB_CONFIGFS_OBEX
+          add USB_CONFIGFS_NCM USB_CONFIGFS_ECM USB_CONFIGFS_RNDIS
+          add USB_CONFIGFS_MASS_STORAGE USB_CONFIGFS_EEM
+          add HIDRAW USB_HID HID_GENERIC
+
+          echo ">>> [4/7] 蓝牙攻击面 (RFCOMM / HCI / 虚拟 HCI)"
+          add BT BT_RFCOMM BT_RFCOMM_TTY BT_HIDP BT_BNEP
+          add BT_HCIUART BT_HCIUART_H4 BT_HCIUART_BCSP BT_HCIUART_LL BT_HCIUART_3WIRE
+          add BT_HCIVHCI BT_HCIBTUSB
+
+          echo ">>> [5/7] USB 串口 / SDR / CAN 总线"
+          add USB_SERIAL USB_SERIAL_GENERIC USB_SERIAL_FTDI_SIO USB_SERIAL_PL2303 \
+              USB_SERIAL_CP210X USB_SERIAL_CH341 USB_SERIAL_OPTION USB_ACM
+          add USB_NET_DRIVERS USB_USBNET USB_RTL8152 USB_NET_RNDIS_HOST \
+              USB_NET_CDCETHER USB_NET_CDC_NCM USB_NET_AX88179_178A USB_STORAGE
+          # SDR：DVB_USB_V2 框架是 RTL28XXU/DVBSKY 的前置依赖（漏开会导致它们被静默丢弃）
+          add MEDIA_SUPPORT MEDIA_USB_SUPPORT MEDIA_DIGITAL_TV_SUPPORT MEDIA_SDR_SUPPORT
+          add MEDIA_RADIO_SUPPORT MEDIA_CONTROLLER VIDEO_DEV VIDEOBUF2_VMALLOC
+          # DVB_USB_RTL28XXU 额外依赖 I2C_MUX（漏开同样会被静默丢弃）
+          add I2C_MUX
+          add DVB_CORE DVB_USB DVB_USB_V2 DVB_USB_RTL28XXU DVB_USB_DVBSKY
+          add USB_AIRSPY USB_HACKRF
+          add CAN CAN_RAW CAN_BCM CAN_GW CAN_VCAN CAN_SLCAN CAN_GS_USB CAN_8DEV_USB
+
+          echo ">>> [6/7] 渗透测试文件系统 / 网络工具链"
+          add NFS_FS NFS_V3 NFS_V3_ACL NFS_V4 NFSD NFSD_V4 SUNRPC
+          add NETFILTER_XT_MATCH_OWNER NETFILTER_XT_MATCH_PKTTYPE NETFILTER_XT_MATCH_HL \
+              NETFILTER_XT_MATCH_COMMENT NETFILTER_XT_MATCH_MULTIPORT NETFILTER_XT_MATCH_LIMIT \
+              NETFILTER_XT_MATCH_HASHLIMIT NETFILTER_XT_MATCH_CONNTRACK NETFILTER_XT_MATCH_STATE
+          add NETFILTER_XT_TARGET_REJECT NETFILTER_XT_TARGET_LOG NETFILTER_XT_TARGET_NFLOG \
+              NETFILTER_XT_TARGET_TPROXY NETFILTER_XT_TARGET_TCPMSS NETFILTER_XT_MARK
+          add IP_NF_TARGET_REJECT
+          add NETFILTER_NETLINK_QUEUE NETFILTER_NETLINK_LOG
+          add IP_SET IP_SET_HASH_IP IP_SET_HASH_NET NETFILTER_XT_SET
+          add TUN VETH BRIDGE BRIDGE_NETFILTER PACKET UNIX INET IPV6
+          add KPROBES FTRACE FUNCTION_TRACER DEBUG_FS BPF_SYSCALL BPF_JIT
+
+          # ---------- 内嵌 RTL8188EU 固件（网卡开箱即用）----------
+          echo ">>> [附加] 内嵌 RTL8188EU 无线网卡固件"
+          if timeout 90 curl -sSL -o /tmp/rtl8188eufw.bin \
+               https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtlwifi/rtl8188eufw.bin \
+             && [ -s /tmp/rtl8188eufw.bin ]; then
+            mkdir -p firmware/rtlwifi
+            cp /tmp/rtl8188eufw.bin firmware/rtlwifi/rtl8188eufw.bin
+            echo "CONFIG_EXTRA_FIRMWARE=\"rtlwifi/rtl8188eufw.bin\"" >> "$DB"
+            echo "CONFIG_EXTRA_FIRMWARE_DIR=\"firmware\"" >> "$DB"
+            echo "    [OK] 固件已内嵌 ($(stat -c%s /tmp/rtl8188eufw.bin) bytes)"
+          else
+            echo "    [跳过] 固件下载失败；可稍后手动放入 /vendor/firmware/rtlwifi/"
+          fi
+
+          echo ">>> [7/7] 应用 6.6 无线注入补丁 (monitor 模式 / 数据包注入)"
+          if timeout 90 curl -sSL -o /tmp/inj.patch \
+               https://raw.githubusercontent.com/wumingzhinu/kali-nethunter-kernel-patches/main/adapted/6.6/add-wifi-injection-6.6.patch \
+             && [ -s /tmp/inj.patch ]; then
+            if patch -p1 --dry-run < /tmp/inj.patch > /tmp/inj_dry.log 2>&1; then
+              patch -p1 < /tmp/inj.patch > /tmp/inj.log 2>&1 || true
+              echo "    [OK] 注入补丁已应用 (monitor/injection 能力已启用)"
+            else
+              echo "    [警告] 注入补丁未能干净应用，跳过（内核仍可正常使用，仅缺注入能力）"
+              tail -12 /tmp/inj_dry.log | sed 's/^/      /'
+            fi
+          else
+            echo "    [跳过] 注入补丁下载失败"
+          fi
+
+          # ---------- 可选回退：零风险模式 ----------
+          if [[ "${{ github.event.inputs.nethunter_wifi_stack }}" == "false" ]]; then
+            echo ">>> [回退模式] 移除 802.11 协议栈与外置网卡驱动，仅保留 HID/蓝牙/SDR"
+            for k in WLAN WIRELESS CFG80211 CFG80211_WEXT MAC80211 MAC80211_MESH MAC80211_LEDS \
+                     RFKILL WLAN_VENDOR_REALTEK WLAN_VENDOR_ATH WLAN_VENDOR_RALINK \
+                     WLAN_VENDOR_MEDIATEK WLAN_VENDOR_ZYDAS RTL8XXXU RTL8XXXU_UNTESTED \
+                     RTL8187 MT7601U ATH9K_HTC USB_ZD1201 EEPROM_93CX6 EXTRA_FIRMWARE; do
+              sed -i "s|^CONFIG_${k}=.*|# CONFIG_${k} is not set|" "$DB"
+            done
+          fi
+
+          # ---------- 校验 ----------
+          echo ">>> 校验关键配置写入结果:"
+          for k in CFG80211 MAC80211 RTL8XXXU USB_CONFIGFS_F_HID BT_HCIVHCI \
+                   USB_SERIAL MEDIA_SDR_SUPPORT DVB_USB_V2 DVB_USB_RTL28XXU USB_HACKRF CAN_RAW NFSD EXTRA_FIRMWARE; do
+            if grep -qE "^CONFIG_${k}=" "$DB"; then
+              printf '    [OK]   %s\n' "$(grep -E "^CONFIG_${k}=" "$DB" | tail -1)"
+            else
+              printf '    [MISS] CONFIG_%s\n' "$k"
+            fi
+          done
+          echo ">>> NetHunter 支持层应用完成。"
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -723,6 +854,8 @@ jobs:
           echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
+          echo "NetHunter: ${{ github.event.inputs.nethunter_enable }}" >> ./ak3.log
+          echo "NetHunter-WiFi: ${{ github.event.inputs.nethunter_wifi_stack }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -806,6 +939,8 @@ jobs:
           - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
+          - NetHunter 渗透支持：${{ github.event.inputs.nethunter_enable }}
+          - NetHunter 无线网卡(802.11+外置网卡驱动+注入补丁)：${{ github.event.inputs.nethunter_wifi_stack }}
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
