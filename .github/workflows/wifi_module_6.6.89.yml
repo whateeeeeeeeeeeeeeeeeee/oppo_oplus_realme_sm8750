@@ -714,6 +714,30 @@ jobs:
             fi
           done
 
+          echo "=========================================================="
+          echo "  编译 aircrack-ng 8188eu (monitor + 帧注入)"
+          echo "=========================================================="
+          # 注意：这个驱动与 rtl8xxxu 争同一个硬件，二选一使用。
+          # 它自带 cfg80211 接口实现（vendor 风格），支持 monitor 与注入。
+          cd "$WORKDIR/kernel_workspace"
+          if [ ! -d rtl8188eus ]; then
+            aria2c -s8 -x8 -k1M -q --retry-wait=3 -m5               "https://codeload.github.com/aircrack-ng/rtl8188eus/zip/refs/heads/v5.3.9" -o ak.zip               && unzip -q -o ak.zip && mv rtl8188eus-5.3.9 rtl8188eus
+          fi
+          if [ -d rtl8188eus ]; then
+            cd rtl8188eus
+            # 关掉用不到的芯片，只留 8188E，缩短编译时间
+            for chip in RTL8192E RTL8812A RTL8821A RTL8723B RTL8814A RTL8703B RTL8723D RTL8188F RTL8822B RTL8821C; do
+              sed -i "s/^CONFIG_${chip} = y/CONFIG_${chip} = n/" Makefile 2>/dev/null || true
+            done
+            # 使用纯净内核源码树作为 KSRC
+            make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-                  KSRC="$WORKDIR/kernel_workspace/common"                  KCFLAGS="-O2 -Wno-error" 2>&1 | tail -25 || true
+            echo ">>> 8188eu 编译结果:"
+            ls -la 8188eu.ko 2>/dev/null || echo "  !! 未产出 8188eu.ko"
+          else
+            echo "  !! rtl8188eus 源码未就绪"
+          fi
+          cd "$WORKDIR/kernel_workspace/common"
+
           echo ">>> 关键配置实测值（写入≠采纳）"
           for k in CFG80211 MAC80211 NL80211_TESTMODE MAC80211_LEDS MAC80211_MESH \
                    MAC80211_DEBUGFS CFG80211_WEXT RTL8XXXU RTL8XXXU_UNTESTED ATH9K_HTC; do
@@ -743,6 +767,16 @@ jobs:
           python3 ci/verify_modules.py kernel_workspace/wifi_stage \
             --oracle ci/oracle_crc.json \
             --targets rtl8xxxu,rtl8187,mt7601u,eeprom_93cx6 2>&1 | tee verify.txt
+
+          echo
+          echo "########## 8188eu (monitor 驱动) 符号检查 ##########"
+          AK="$GITHUB_WORKSPACE/kernel_workspace/rtl8188eus/8188eu.ko"
+          if [ -f "$AK" ]; then
+            cp "$AK" kernel_workspace/wifi_stage/
+            python3 ci/verify_modules.py kernel_workspace/wifi_stage               --oracle ci/oracle_crc.json --targets 8188eu 2>&1 | tee -a verify.txt
+          else
+            echo "  !! 8188eu.ko 未产出 —— 见上方编译日志" | tee -a verify.txt
+          fi
 
           echo
           echo "########## 自编协议栈导出表 vs 厂商（配置是否对齐）##########"
@@ -776,6 +810,16 @@ jobs:
             fi
           done
 
+          # 8188eu（monitor + 帧注入）与 rtl8xxxu 争同一硬件，不能同时加载。
+          # 放到 independent/ 目录，由切换脚本启用，默认不加载。
+          mkdir -p "$M/independent"
+          if [ -f "wifi_stage/8188eu.ko" ]; then
+            cp "wifi_stage/8188eu.ko" "$M/independent/"
+            echo "  [注入] 8188eu.ko -> independent/ (需切换启用)"
+          else
+            echo "  !! 8188eu.ko 缺失，monitor 功能不可用"
+          fi
+
           # RTL8188EU 固件（驱动向内核请求 rtlwifi/rtl8188eufw.bin）
           curl -sSL --retry 3 -o /tmp/fw.bin \
             https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtlwifi/rtl8188eufw.bin
@@ -790,7 +834,7 @@ jobs:
           SD="$(pwd)/../module_scripts"
           [ -d "$SD" ] || SD="$GITHUB_WORKSPACE/module_scripts"
           [ -d "$SD" ] || { echo "!! 找不到 module_scripts"; exit 1; }
-          for s in post-fs-data.sh service.sh customize.sh; do
+          for s in post-fs-data.sh service.sh customize.sh mode.sh; do
             cp "$SD/$s" "$M/$s" || { echo "!! 缺少 $s"; exit 1; }
             echo "  [脚本] $s"
           done
