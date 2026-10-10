@@ -834,7 +834,7 @@ jobs:
           SD="$(pwd)/../module_scripts"
           [ -d "$SD" ] || SD="$GITHUB_WORKSPACE/module_scripts"
           [ -d "$SD" ] || { echo "!! 找不到 module_scripts"; exit 1; }
-          for s in post-fs-data.sh service.sh customize.sh mode.sh; do
+          for s in post-fs-data.sh service.sh customize.sh mode.sh check.sh; do
             cp "$SD/$s" "$M/$s" || { echo "!! 缺少 $s"; exit 1; }
             echo "  [脚本] $s"
           done
