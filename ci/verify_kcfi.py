@@ -39,6 +39,20 @@ EXPECT_SELECT_QUEUE = 0x32D0349B
 #   取自内核 panic 日志 "expected type"
 EXPECT_TASKLET = 0xAECEE44B
 
+# ---- 以下类别【已实测全部正确】，加入闸门只为防将来回归 ----
+# notifier_call: int (*)(struct notifier_block *, unsigned long, void *)
+EXPECT_NOTIFIER = 0x2A4CEC24
+# usb_driver.probe: int (*)(struct usb_interface *, const struct usb_device_id *)
+EXPECT_USB_PROBE = 0xAA8A790B
+# usb_driver.disconnect: void (*)(struct usb_interface *)
+EXPECT_USB_DISCONNECT = 0x94FD73DA
+# usb_driver.suspend: int (*)(struct usb_interface *, pm_message_t)
+EXPECT_USB_SUSPEND = 0x57E8B95F
+# usb_driver.resume: int (*)(struct usb_interface *)
+EXPECT_USB_RESUME = 0xEC58459B
+# driver.shutdown: void (*)(struct device *)
+EXPECT_SHUTDOWN = 0x94EE7DF3
+
 # 必须返回 netdev_tx_t 的函数（注册进 net_device_ops.ndo_start_xmit）
 XMIT_FUNCS = [
     "rtw_xmit_entry",
@@ -47,6 +61,15 @@ XMIT_FUNCS = [
 ]
 SELECT_QUEUE_FUNCS = ["rtw_select_queue"]
 TASKLET_FUNCS = ["usb_recv_tasklet", "rtl8188eu_xmit_tasklet", "mpath_tx_tasklet_hdl"]
+NOTIFIER_FUNCS = ["rtw_ndev_notifier_call", "rtw_inetaddr_notifier_call",
+                  "rtw_inet6addr_notifier_call"]
+USB_FUNCS = [
+    ("usb.probe", "rtw_drv_init", EXPECT_USB_PROBE),
+    ("usb.disconnect", "rtw_dev_remove", EXPECT_USB_DISCONNECT),
+    ("usb.suspend", "rtw_suspend", EXPECT_USB_SUSPEND),
+    ("usb.resume", "rtw_resume", EXPECT_USB_RESUME),
+    ("driver.shutdown", "rtw_dev_shutdown", EXPECT_SHUTDOWN),
+]
 
 
 def load(ko):
@@ -121,6 +144,14 @@ def main():
     print("  [tasklet] 必须 void(unsigned long) — 内核期望 0x%08x" % EXPECT_TASKLET)
     for f in TASKLET_FUNCS:
         check("tasklet", f, EXPECT_TASKLET)
+
+    print("  [notifier_call] 必须 int(*)(notifier_block*,ulong,void*) — 0x%08x" % EXPECT_NOTIFIER)
+    for f in NOTIFIER_FUNCS:
+        check("notifier_call", f, EXPECT_NOTIFIER)
+
+    print("  [usb_driver / driver 回调]")
+    for label, f, exp in USB_FUNCS:
+        check(label, f, exp)
 
     print()
     if fails:
