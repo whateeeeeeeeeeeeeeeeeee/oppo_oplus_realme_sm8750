@@ -755,6 +755,29 @@ jobs:
             fi
             echo
 
+            # 关键之五：修复【第二次】panic 的类型不匹配 —— ndo_start_xmit。
+            # 崩溃现场（console-ramoops-0 (最新)，第 2 次）：
+            #   CFI failure at dev_hard_start_xmit+0x10/0x2d0
+            #     (target: rtw_xmit_entry+0x0/0x3c [8188eu]; expected type: 0x44e57e43)
+            # 这恰好说明 tasklet 修复【已生效】——驱动这次一路 probe 成功、
+            # 注册好 netdev、开始发包，才在发包路径撞上新的类型不匹配。
+            # 根因：内核 net_device_ops.ndo_start_xmit 返回 netdev_tx_t(enum)，
+            #       驱动 3 个 xmit 回调返回 int：
+            #           int          -> 0xab1f26f7   ← 驱动实际编出来的
+            #           netdev_tx_t  -> 0x44e57e43   ← 内核期望的
+            #       enum 与 int 在 C 里隐式兼容，clang 不报错也不警告，
+            #       所以必须显式改签名，否则每次发包都会 panic。
+            if [ -f "$WORKDIR/ci/fix_cfi_xmit.py" ]; then
+              python3 "$WORKDIR/ci/fix_cfi_xmit.py" "$WORKDIR/kernel_workspace/rtl8188eus" || {
+                echo "  !! fix_cfi_xmit.py 失败，终止（避免再产出一个会 panic 的包）"
+                exit 1
+              }
+            else
+              echo "  !! 找不到 ci/fix_cfi_xmit.py，ndo_start_xmit CFI 未修复"
+              exit 1
+            fi
+            echo
+
             NSSYM="VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver"
             if ! grep -q "MODULE_IMPORT_NS" os_dep/linux/usb_intf.c; then
               echo 'MODULE_IMPORT_NS('"$NSSYM"');' >> os_dep/linux/usb_intf.c
@@ -847,6 +870,21 @@ jobs:
             printf "  %-22s " "$(basename $f)"
             strings "$f" | grep -m1 '^vermagic=' || echo "(无)"
           done | tee -a verify.txt
+
+          echo
+          echo "########## KCFI 类型闸门（第三次事故防线）##########"
+          # 前两次 panic 都是 KCFI 类型不匹配：tasklet(已修) 与 ndo_start_xmit(本次修)。
+          # 这里直接读 .ko 里编出来的 typeid，与内核期望值比对；
+          # 不一致就【构建失败】，绝不让会 panic 的包流出。
+          if [ -f ci/verify_kcfi.py ]; then
+            python3 ci/verify_kcfi.py "$AK" 2>&1 | tee -a verify.txt || {
+              echo "!! KCFI 校验未通过 —— 该包会在真机上 panic，已阻止发布"
+              exit 1
+            }
+          else
+            echo "!! 缺少 ci/verify_kcfi.py —— KCFI 闸门无法执行"
+            exit 1
+          fi
 
       - name: 组装 KernelSU 模块 zip
         run: |
