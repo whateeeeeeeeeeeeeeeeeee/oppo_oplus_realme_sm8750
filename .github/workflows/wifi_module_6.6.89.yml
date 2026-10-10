@@ -737,7 +737,23 @@ jobs:
             KOUT="$WORKDIR/kernel_workspace/common/out"
             # 与内核编译用同一套 wrapper，保证编译器版本/参数一致，
             # 否则 genksyms 算出的 CRC 可能与内核不匹配。
-            make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-                  CC="$WORKDIR/kernel_workspace/common/cc-wrapper"                  LD="$WORKDIR/kernel_workspace/common/ld-wrapper"                  HOSTLD=ld.lld LLVM=1                  -C "$WORKDIR/kernel_workspace/common" O="$KOUT"                  M="$WORKDIR/kernel_workspace/rtl8188eus"                  KCFLAGS="-O2 -Wno-error" modules 2>&1 | tail -40 || true
+            # 关键之二：必须显式传 CONFIG_RTL8188EU=m。
+            # 该驱动的 Makefile 结构是：
+            #     ifneq ($(KERNELRELEASE),)
+            #         obj-$(CONFIG_RTL8188EU) := $(MODULE_NAME).o   ← kbuild 走这支
+            #     else
+            #         export CONFIG_RTL8188EU = m                   ← 只在手工 make 时导出
+            #         modules: $(MAKE) -C $(KSRC) M=$(pwd) modules
+            # 我们绕过它的 modules 目标直接调 kbuild，所以这个变量不会被导出，
+            # obj- 展开为空 → kbuild 认为无物可编（日志里只有 MODPOST 没有 CC）。
+            # 另外 CONFIG_RTL8188E 决定 MODULE_NAME，也要一并传入。
+            make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-                  CC="$WORKDIR/kernel_workspace/common/cc-wrapper"                  LD="$WORKDIR/kernel_workspace/common/ld-wrapper"                  HOSTLD=ld.lld LLVM=1                  CONFIG_RTL8188EU=m CONFIG_RTL8188E=y                  -C "$WORKDIR/kernel_workspace/common" O="$KOUT"                  M="$WORKDIR/kernel_workspace/rtl8188eus"                  KCFLAGS="-O2 -Wno-error" modules 2>&1 | tee /tmp/ak_build.log | tail -60 || true
+
+            echo ">>> 编译日志统计:"
+            echo "    CC 行数: $(grep -c 'CC .*rtl8188eus\|CC \[' /tmp/ak_build.log 2>/dev/null || echo 0)"
+            echo "    error 数: $(grep -ci 'error' /tmp/ak_build.log 2>/dev/null || echo 0)"
+            echo ">>> 最后 30 行原始日志:"
+            tail -30 /tmp/ak_build.log 2>/dev/null || true
 
             echo ">>> 8188eu 编译结果:"
             ls -la 8188eu.ko 2>/dev/null || echo "  !! 未产出 8188eu.ko"
