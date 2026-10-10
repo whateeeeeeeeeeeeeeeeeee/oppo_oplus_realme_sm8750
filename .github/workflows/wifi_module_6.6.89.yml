@@ -729,6 +729,22 @@ jobs:
             for chip in RTL8192E RTL8812A RTL8821A RTL8723B RTL8814A RTL8703B RTL8723D RTL8188F RTL8822B RTL8821C; do
               sed -i "s/^CONFIG_${chip} = y/CONFIG_${chip} = n/" Makefile 2>/dev/null || true
             done
+
+            # 关键之三：声明导入 Android GKI 的 VFS 命名空间。
+            # 内核里这两个符号以 EXPORT_SYMBOL_NS(..., ANDROID_GKI_VFS_EXPORT_ONLY)
+            # 导出，宏展开成字符串：
+            #   VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver
+            # 不声明导入会被 modpost 拦下（filp_open / kernel_read）。
+            # MODULE_IMPORT_NS(ns) = MODULE_INFO(import_ns, __stringify(ns))，
+            # 直接追加一行到主源文件即可，无需改动其他代码。
+            NSSYM="VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver"
+            if ! grep -q "MODULE_IMPORT_NS" os_dep/linux/usb_intf.c; then
+              echo 'MODULE_IMPORT_NS('"$NSSYM"');' >> os_dep/linux/usb_intf.c
+              echo "  已注入 MODULE_IMPORT_NS"
+            fi
+            tail -3 os_dep/linux/usb_intf.c
+
+
             # 关键：内核是 O=out 外置构建，配置生成在 common/out/ 下。
             # 驱动自带的 modules 目标只传 -C $(KSRC)，不带 O=，
             # 内核会去源码根目录找 include/config/auto.conf 而报
