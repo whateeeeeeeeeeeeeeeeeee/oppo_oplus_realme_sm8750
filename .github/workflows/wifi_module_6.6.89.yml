@@ -111,6 +111,11 @@ jobs:
       actions: write
       contents: read
     steps:
+      - name: 取出本仓库 (为了拿到 ci/ 校验脚本)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: 安装环境依赖+初始化源码仓库及llvm-Clang18工具链
         run: |
           rm -rf kernel_workspace
@@ -721,6 +726,11 @@ jobs:
         if: always()
         run: |
           set -u
+          if [ ! -f ci/verify_modules.py ]; then
+            echo "!! 找不到 ci/verify_modules.py —— checkout 未生效，校验无法进行"
+            echo "!! 这不是通过，而是校验被跳过，请检查工作流"
+            exit 1
+          fi
           echo "########## 与手机认可的 CRC 基准逐项比对 ##########"
           echo "(基准来自手机上真实运行的厂商 cfg80211.ko / mac80211.ko / rfkill.ko / libarc4.ko)"
           python3 ci/verify_modules.py kernel_workspace/wifi_stage \
@@ -738,7 +748,6 @@ jobs:
             printf "  %-22s " "$(basename $f)"
             strings "$f" | grep -m1 '^vermagic=' || echo "(无)"
           done | tee -a verify.txt
-        continue-on-error: true
 
       - name: 组装 KernelSU 模块 zip
         run: |
@@ -877,8 +886,16 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: wifi-usb-drivers
-          path: |
-            ${{ github.workspace }}/kernel_workspace/wifi_usb_drivers_*.zip
-            ${{ github.workspace }}/verify.txt
+          # archive:false 时只能给单个文件，所以 verify.txt 用单独一步传
+          path: ${{ github.workspace }}/kernel_workspace/wifi_usb_drivers_*.zip
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传校验报告
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crc-verify-report
+          path: ${{ github.workspace }}/verify.txt
           archive: false
           if-no-files-found: warn
