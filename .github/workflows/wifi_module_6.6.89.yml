@@ -737,6 +737,24 @@ jobs:
             # 不声明导入会被 modpost 拦下（filp_open / kernel_read）。
             # MODULE_IMPORT_NS(ns) = MODULE_INFO(import_ns, __stringify(ns))，
             # 直接追加一行到主源文件即可，无需改动其他代码。
+            # 关键之四：修复 CFI 不兼容（这是导致 kernel panic 的真凶）。
+            # 崩溃现场（console-ramoops-0）：
+            #   CFI failure at tasklet_action_common+0x244/0x4a8
+            #     (target: usb_recv_tasklet+0x0/0xf8 [8188eu]; expected type: 0xaecee44b)
+            #   Internal error: Oops - CFI
+            #   Kernel panic - not syncing: Oops - CFI: Fatal exception in interrupt
+            # 根因：内核声明的 tasklet 回调是 void (*)(unsigned long)，
+            #       驱动把 void (*)(void *) 的函数强转后塞进去。
+            #       本内核 CONFIG_CFI_CLANG=y，运行时会校验真实类型，
+            #       强转骗不过 → Oops → PANIC_ON_OOPS=y 放大成整机 panic。
+            # 修法：把 3 个回调签名改成 unsigned long 并去掉强转。
+            if [ -f "$WORKDIR/ci/fix_cfi.py" ]; then
+              python3 "$WORKDIR/ci/fix_cfi.py" "$WORKDIR/kernel_workspace/rtl8188eus" || true
+            else
+              echo "  !! 找不到 ci/fix_cfi.py，CFI 未修复"
+            fi
+            echo
+
             NSSYM="VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver"
             if ! grep -q "MODULE_IMPORT_NS" os_dep/linux/usb_intf.c; then
               echo 'MODULE_IMPORT_NS('"$NSSYM"');' >> os_dep/linux/usb_intf.c
