@@ -551,7 +551,13 @@ jobs:
           # 判据：对应函数在该 .ko 里根本不存在，且导出数正好 136
           #（若 LEDS=y 会多出 5 个 __ieee80211_*_led_name → 141）
           n  CFG80211_WEXT CFG80211_DEBUGFS CFG80211_REQUIRE_SIGNED_REGDB CFG80211_USE_KERNEL_REGDB_KEYS
-          n  MAC80211_LEDS MAC80211_MESH MAC80211_DEBUGFS NL80211_TESTMODE
+          n  MAC80211_LEDS MAC80211_MESH MAC80211_DEBUGFS
+          # NL80211_TESTMODE 必须【开启】！
+          # 它给 struct cfg80211_ops 增加 testmode_cmd/testmode_dump 两个成员，
+          # 关掉会让 wiphy_new_nm 与 ieee80211_alloc_hw_nm 的 CRC 变化。
+          # 实测厂商 cfg80211.ko 里有 34 个 testmode 符号、mac80211.ko 里有
+          # ieee80211_testmode_cmd/dump，证明厂商是开着的。
+          y  NL80211_TESTMODE
           # 速率控制算法：rtl8xxxu 自己设 HAS_RATE_CONTROL，
           # mac80211 不会去选算法 → 关掉以免引入多余符号
           n  MAC80211_RC_MINSTREL MAC80211_RC_MINSTREL_HT MAC80211_RC_PID
