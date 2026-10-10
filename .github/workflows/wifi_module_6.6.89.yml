@@ -91,10 +91,10 @@ on:
         type: boolean
         default: 'false'
       wifi_drivers_enable:
-        description: '是否编译外置USB无线网卡驱动(RTL8188EU/AR9271/MT7601U等，编成模块不刷内核，需配合Magisk模块加载)'
+        description: '编译外置USB无线网卡驱动(只编.ko,不改内核;默认开启)'
         required: true
         type: boolean
-        default: 'false'
+        default: 'true'
       kernel_suffix:
         description: '内核后缀(留空默认,开头别加连字符,勿加空格等影响指令运行的保留字符)'
         required: false
@@ -106,12 +106,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
-      zipname: ${{ steps.pack.outputs.ak3name }}
+      zipname: ${{ steps.pack.outputs.zipname }}
     permissions:
       actions: write
       contents: read
     steps:
-      - name: 取出本仓库 (为了拿到 ci/ 校验脚本)
+      - name: 取出本仓库 (为了拿到 ci/ 校验脚本与 module_scripts/)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -522,62 +522,59 @@ jobs:
             fi
           fi
 
-      - name: 启用外置USB无线网卡驱动 (模块方案·不改内核行为)
+      - name: 启用外置USB无线网卡驱动 (模块方案·不刷内核)
         if: inputs.wifi_drivers_enable
         run: |
           set -u
           echo "=========================================================="
-          echo "  外置 USB 无线网卡驱动 —— 【模块方案】"
+          echo "  外置 USB 无线网卡驱动 —— 【纯模块方案】"
           echo "=========================================================="
-          echo "  只把驱动编成 .ko，开机后由 KernelSU 模块 insmod。"
-          echo "  不产出 boot 镜像 → 失败最坏情况仅网卡不认，绝不重启。"
+          echo "  只编 .ko，不产出 boot 镜像、不碰任何分区、不加载任何东西。"
+          echo "  失败最坏情况 = 网卡不认，绝不可能重启。"
           echo ""
-          echo "  协议栈(CFG80211/MAC80211)设成 =m，与厂商 vendor_dlkm 一致。"
-          echo "  netdevice.h 里的 Android KMI hack 保证这不会移动 net_device 布局，"
-          echo "  因此已有内核符号的 CRC 不变。"
+          echo "  协议栈设成 =m：手机上 vendor_dlkm 已提供 cfg80211/mac80211，"
+          echo "  本工作流编出的只用于【离线 CRC 比对】，不进模块 zip。"
           cd kernel_workspace/common
           DB=./arch/arm64/configs/gki_defconfig
           y() { for k in "$@"; do echo "CONFIG_${k}=y" >> "$DB"; done; }
           m() { for k in "$@"; do echo "CONFIG_${k}=m" >> "$DB"; done; }
           n() { for k in "$@"; do echo "# CONFIG_${k} is not set" >> "$DB"; done; }
 
-          echo ">>> [1/3] 802.11 协议栈 —— 全部 =m（与厂商模块一致）"
+          echo ">>> [1/3] 802.11 协议栈 (=m，与厂商 vendor_dlkm 一致)"
           y  WLAN WIRELESS WIRELESS_EXT WEXT_CORE WEXT_PROC WEXT_SPY WEXT_PRIV
           m  CFG80211 MAC80211 RFKILL CRYPTO_LIB_ARC4
           y  CFG80211_CRDA_SUPPORT CFG80211_DEFAULT_PS
           y  LEDS_CLASS LEDS_TRIGGERS RFKILL_LEDS DEBUG_FS EXPERT
           m  EEPROM_93CX6
-          # 以下经实测厂商 mac80211.ko 均为【关闭】
-          # 判据：对应函数在该 .ko 里根本不存在，且导出数正好 136
-          #（若 LEDS=y 会多出 5 个 __ieee80211_*_led_name → 141）
+          # 以下四项经【实测厂商 .ko】确认均为关闭：
+          #   MAC80211_LEDS    —— 若为 y 会多导出 5 个 __ieee80211_*_led_name
+          #                        （厂商 mac80211.ko 恰好导出 136 个，含 LED 则 141）
+          #   MAC80211_MESH / MAC80211_DEBUGFS / CFG80211_WEXT / CFG80211_DEBUGFS
+          #                    —— 对应函数在厂商 .ko 里根本不存在
           n  CFG80211_WEXT CFG80211_DEBUGFS CFG80211_REQUIRE_SIGNED_REGDB CFG80211_USE_KERNEL_REGDB_KEYS
           n  MAC80211_LEDS MAC80211_MESH MAC80211_DEBUGFS
-          # NL80211_TESTMODE 必须【开启】！
-          # 它给 struct cfg80211_ops 增加 testmode_cmd/testmode_dump 两个成员，
-          # 关掉会让 wiphy_new_nm 与 ieee80211_alloc_hw_nm 的 CRC 变化。
-          # 实测厂商 cfg80211.ko 里有 34 个 testmode 符号、mac80211.ko 里有
-          # ieee80211_testmode_cmd/dump，证明厂商是开着的。
+          # NL80211_TESTMODE 必须【开启】(厂商是 y)。
+          # 它给 struct cfg80211_ops 与 struct ieee80211_ops 各加 2 个成员，
+          # 关掉会让 wiphy_new_nm / ieee80211_alloc_hw_nm 的 CRC 变化
+          # —— 这两个正是驱动申请网卡的入口，对不上就完全不可用。
           y  NL80211_TESTMODE
           # 速率控制算法：rtl8xxxu 自己设 HAS_RATE_CONTROL，
-          # mac80211 不会去选算法 → 关掉以免引入多余符号
+          # mac80211 不会去选算法，关掉以免引入多余符号
           n  MAC80211_RC_MINSTREL MAC80211_RC_MINSTREL_HT MAC80211_RC_PID
 
-          echo ">>> [2/3] USB 无线网卡驱动 —— 全部 =m"
+          echo ">>> [2/3] USB 无线网卡驱动 (=m)"
           y  WLAN_VENDOR_REALTEK WLAN_VENDOR_ATH WLAN_VENDOR_RALINK WLAN_VENDOR_MEDIATEK
           m  RTL8XXXU RTL8187 MT7601U
           # 0bda:8179 在主设备表内，不受 UNTESTED 控制 → 必须关闭
           n  RTL8XXXU_UNTESTED
-          # 不编 ATH9K_HTC：它的 Kconfig 里有
-          #   select MAC80211_LEDS if LEDS_CLASS=y
+          # 不编 ATH9K_HTC：其 Kconfig 含
+          #     select MAC80211_LEDS if LEDS_CLASS=y
           # 本内核 LEDS_CLASS=y，会强制打开 MAC80211_LEDS，
-          # 使自编 mac80211 多出 5 个符号，与厂商的 136 个不再一致。
-          # 目标网卡是 RTL8188EU，用不到它，直接不编最干净。
+          # 使自编 mac80211 多出 5 个符号而与厂商的 136 个不一致。
+          # 目标网卡是 RTL8188EU，用不到它。
           n  ATH9K_HTC ATH9K_HTC_DEBUGFS
 
-          echo ">>> [3/3] 记录（写入≠采纳，稍后以内核 out/.config 为准）"
-          for k in CFG80211 MAC80211 RTL8XXXU RTL8187 ATH9K_HTC MT7601U; do
-            echo "    CONFIG_${k}=m"
-          done
+          echo ">>> [3/3] 配置已写入，稍后以内核 out/.config 实测值为准"
 
       - name: 启用ADIOS IO调度器
         if: inputs.adios_enable
@@ -699,24 +696,29 @@ jobs:
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
 
           echo "=========================================================="
-          echo "  编译内核模块 (make modules)"
+          echo "  编译内核模块"
           echo "=========================================================="
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
                KCFLAGS+=-O2 KCFLAGS+=-Wno-error modules
 
-          echo ">>> 收集无线相关模块"
+          echo ">>> 收集模块"
           STAGE="$WORKDIR/kernel_workspace/wifi_stage"
           rm -rf "$STAGE"; mkdir -p "$STAGE"
           for w in cfg80211 mac80211 libarc4 rfkill rtl8xxxu rtl8187 eeprom_93cx6 mt7601u; do
             f=$(find out -name "$w.ko" 2>/dev/null | head -1)
-            if [ -n "$f" ]; then cp "$f" "$STAGE/"; echo "  [有] $w.ko  ($(stat -c%s "$f") 字节)"
-            else echo "  [无] $w.ko"; fi
+            if [ -n "$f" ]; then
+              cp "$f" "$STAGE/"; echo "  [有] $w.ko  ($(stat -c%s "$f") 字节)"
+            else
+              echo "  [无] $w.ko"
+            fi
           done
-          echo ">>> 实际生效配置："
-          for k in CFG80211 MAC80211 MAC80211_LEDS MAC80211_MESH MAC80211_DEBUGFS \
-                   CFG80211_WEXT NL80211_TESTMODE RTL8XXXU RTL8XXXU_UNTESTED ATH9K_HTC; do
-            printf "    %-26s " "$k"; grep -E "^CONFIG_${k}=" out/.config || echo "(未设置)"
+
+          echo ">>> 关键配置实测值（写入≠采纳）"
+          for k in CFG80211 MAC80211 NL80211_TESTMODE MAC80211_LEDS MAC80211_MESH \
+                   MAC80211_DEBUGFS CFG80211_WEXT RTL8XXXU RTL8XXXU_UNTESTED ATH9K_HTC; do
+            printf "    %-24s " "$k"
+            grep -E "^CONFIG_${k}=" out/.config || echo "(未设置)"
           done
           ls -la "$STAGE"
           
@@ -728,24 +730,23 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ github.ref_name }}
          
-      - name: 验证 CRC 兼容性 (核心闸门)
-        if: always()
+      - name: 验证 CRC 兼容性 (核心闸门·失败则整体失败)
         run: |
           set -u
-          if [ ! -f ci/verify_modules.py ]; then
-            echo "!! 找不到 ci/verify_modules.py —— checkout 未生效，校验无法进行"
-            echo "!! 这不是通过，而是校验被跳过，请检查工作流"
-            exit 1
-          fi
-          echo "########## 与手机认可的 CRC 基准逐项比对 ##########"
-          echo "(基准来自手机上真实运行的厂商 cfg80211.ko / mac80211.ko / rfkill.ko / libarc4.ko)"
+          for f in ci/verify_modules.py ci/cmp_exports.py ci/ko_crc.py ci/oracle_crc.json; do
+            if [ ! -f "$f" ]; then
+              echo "!! 缺少 $f —— checkout 未生效，校验无法进行"
+              echo "!! 这不是通过，而是校验被跳过。"
+              exit 1
+            fi
+          done
           python3 ci/verify_modules.py kernel_workspace/wifi_stage \
             --oracle ci/oracle_crc.json \
-            --targets rtl8xxxu,rtl8187,mt7601u 2>&1 | tee verify.txt || true
+            --targets rtl8xxxu,rtl8187,mt7601u,eeprom_93cx6 2>&1 | tee verify.txt
 
           echo
-          echo "########## 自编 mac80211/cfg80211 导出表 vs 厂商（配置是否对齐）##########"
-          python3 ci/cmp_exports.py kernel_workspace/wifi_stage ci/oracle_exports.json 2>&1 | tee -a verify.txt || true
+          echo "########## 自编协议栈导出表 vs 厂商（配置是否对齐）##########"
+          python3 ci/cmp_exports.py kernel_workspace/wifi_stage ci/oracle_exports.json 2>&1 | tee -a verify.txt
 
           echo
           echo "########## vermagic ##########"
@@ -759,125 +760,59 @@ jobs:
         run: |
           set -e
           cd kernel_workspace
-          M=wifi_module; rm -rf $M
-          mkdir -p $M/system/lib/modules
-          mkdir -p $M/firmware/rtlwifi
+          M=wifi_module
+          rm -rf "$M"
+          mkdir -p "$M/system/lib/modules" "$M/firmware/rtlwifi"
 
-          # 只打包手机上没有的驱动；厂商已有的 cfg80211/mac80211/rfkill/libarc4 不重复打包
-          for x in rtl8xxxu rtl8187 eeprom_93cx6 mt7601u; do
-            [ -f "wifi_stage/$x.ko" ] && cp "wifi_stage/$x.ko" $M/system/lib/modules/
-          done
-          mkdir -p $M/reference
-          for x in cfg80211 mac80211 rfkill libarc4; do
-            [ -f "wifi_stage/$x.ko" ] && cp "wifi_stage/$x.ko" $M/reference/
-          done
-
-          # RTL8188EU 固件（驱动会向内核请求 rtlwifi/rtl8188eufw.bin）
-          if timeout 120 curl -sSL -o /tmp/rtl8188eufw.bin \
-               https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtlwifi/rtl8188eufw.bin \
-             && [ -s /tmp/rtl8188eufw.bin ]; then
-            cp /tmp/rtl8188eufw.bin $M/firmware/rtlwifi/
-            echo "固件 OK: $(stat -c%s /tmp/rtl8188eufw.bin) 字节"
-          else
-            echo "!! 固件下载失败"
-          fi
-
-          echo "=== 模块内容 ==="
-          ls -la $M/system/lib/modules/ || true
-
-      - name: 写入模块脚本并压缩
-        run: |
-          set -e
-          cd kernel_workspace/wifi_module
-
-          cat > module.prop <<'EOP'
-          id=wifi_usb_drivers
-          name=外置USB无线网卡驱动
-          version=6.6.89-__STAMP__
-          versionCode=__CODE__
-          author=DSH
-          description=为 OnePlus 13 (内核 6.6.89) 提供外置 USB 无线网卡驱动(RTL8188EU/8188FU/8192CU/MT7601U 等)。纯模块加载，不修改内核；失败最坏情况仅网卡不认，不会重启。
-          EOP
-
-          cat > post-fs-data.sh <<'EOS'
-          #!/system/bin/sh
-          MODDIR=${0%/*}
-          LOG=/data/local/tmp/wifi_usb_drivers.log
-          exec >>"$LOG" 2>&1
-          echo "===== $(date) post-fs-data ====="
-
-          # 让内核能在本模块目录里找到固件
-          FWDIR="$MODDIR/firmware"
-          if [ -f "$FWDIR/rtlwifi/rtl8188eufw.bin" ]; then
-            chmod 755 "$FWDIR" "$FWDIR/rtlwifi" 2>/dev/null
-            chmod 644 "$FWDIR/rtlwifi/rtl8188eufw.bin" 2>/dev/null
-            if [ -w /sys/module/firmware_class/parameters/path ]; then
-              echo -n "$FWDIR" > /sys/module/firmware_class/parameters/path
-              echo "firmware_class.path -> $(cat /sys/module/firmware_class/parameters/path)"
-            fi
-          fi
-          chmod 755 "$MODDIR/system/lib/modules" 2>/dev/null
-          chmod 644 "$MODDIR"/system/lib/modules/*.ko 2>/dev/null
-          echo "===== 结束 ====="
-          EOS
-
-          cat > service.sh <<'EOS'
-          #!/system/bin/sh
-          MODDIR=${0%/*}
-          LOG=/data/local/tmp/wifi_usb_drivers.log
-          exec >>"$LOG" 2>&1
-          echo "===== $(date) service: 加载驱动 ====="
-
-          i=0
-          while [ $i -lt 30 ]; do
-            [ -d /sys/bus/usb/devices ] && break
-            sleep 1; i=$((i+1))
-          done
-          sleep 3
-
-          for m in rtl8xxxu rtl8187 eeprom_93cx6 mt7601u; do
-            f="$MODDIR/system/lib/modules/$m.ko"
-            [ -f "$f" ] || continue
-            if grep -q "^$m " /proc/modules; then
-              echo "  [已加载] $m"
-            elif insmod "$f" 2>&1; then
-              echo "  [OK] $m"
+          # 只打包手机上没有的四个模块。
+          # 不打包 cfg80211/mac80211/rfkill/libarc4：
+          #   手机 vendor_dlkm 已有厂商版本且在运行，
+          #   重复提供只会带来约 20MB 冗余与潜在重复符号冲突风险。
+          for x in eeprom_93cx6 rtl8xxxu rtl8187 mt7601u; do
+            if [ -f "wifi_stage/$x.ko" ]; then
+              cp "wifi_stage/$x.ko" "$M/system/lib/modules/"
             else
-              echo "  [失败] $m"
+              echo "!! 缺少 $x.ko"; exit 1
             fi
           done
 
-          echo "--- 无线模块 ---"
-          grep -E 'cfg80211|mac80211|rtl8|8187|ath9k|mt7601|rfkill' /proc/modules || echo "  (无)"
-          echo "--- 网卡接口 ---"
-          ls /sys/class/net/
-          echo "--- dmesg 尾部 ---"
-          dmesg | tail -25
-          echo "===== 完成 ====="
-          EOS
+          # RTL8188EU 固件（驱动向内核请求 rtlwifi/rtl8188eufw.bin）
+          curl -sSL --retry 3 -o /tmp/fw.bin \
+            https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtlwifi/rtl8188eufw.bin
+          if [ -s /tmp/fw.bin ]; then
+            cp /tmp/fw.bin "$M/firmware/rtlwifi/rtl8188eufw.bin"
+            echo "固件 OK: $(stat -c%s /tmp/fw.bin) 字节"
+          else
+            echo "!! 固件下载失败"; exit 1
+          fi
 
-          cat > customize.sh <<'EOS'
-          #!/system/bin/sh
-          ui_print "- 外置USB无线网卡驱动"
-          ui_print "- 驱动: $(ls $MODPATH/system/lib/modules/ 2>/dev/null | paste -sd' ' -)"
-          ui_print "- 日志: /data/local/tmp/wifi_usb_drivers.log"
-          EOS
-
-          sed -i 's/^          //' module.prop post-fs-data.sh service.sh customize.sh
-          chmod 755 post-fs-data.sh service.sh customize.sh
+          # 脚本以真实文件复制，便于逐行审查
+          SD="$(pwd)/../module_scripts"
+          [ -d "$SD" ] || SD="$GITHUB_WORKSPACE/module_scripts"
+          [ -d "$SD" ] || { echo "!! 找不到 module_scripts"; exit 1; }
+          for s in post-fs-data.sh service.sh customize.sh; do
+            cp "$SD/$s" "$M/$s" || { echo "!! 缺少 $s"; exit 1; }
+            echo "  [脚本] $s"
+          done
+          chmod 755 "$M/post-fs-data.sh" "$M/service.sh" "$M/customize.sh"
 
           STAMP="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
           CODE="$(TZ=Asia/Shanghai date +%Y%m%d%H%M)"
-          sed -i "s/__STAMP__/$STAMP/; s/__CODE__/$CODE/" module.prop
+          {
+            echo "id=wifi_usb_drivers"
+            echo "name=外置USB无线网卡驱动"
+            echo "version=6.6.89-$STAMP"
+            echo "versionCode=$CODE"
+            echo "author=DSH"
+            echo "description=为 OnePlus 13 (内核 6.6.89) 提供外置 USB 无线网卡驱动(RTL8188EU/8187/MT7601U)。纯模块加载，不修改内核、不写入任何分区；失败最坏情况仅网卡不认。"
+          } > "$M/module.prop"
 
           ZIP="wifi_usb_drivers_6.6.89.zip"
-          rm -f "../$ZIP"
-          zip -r "../$ZIP" . -x '.*' >/dev/null
-          cd ..
-          echo "=== $ZIP ==="
+          rm -f "$ZIP"
+          ( cd "$M" && zip -r "../$ZIP" . -x '.*' >/dev/null )
+          echo "=== $ZIP 内容 ==="
           unzip -l "$ZIP"
-          echo "ak3name=$ZIP" >> $GITHUB_OUTPUT
-          echo "ZIP_NAME=$ZIP" >> $GITHUB_ENV
+          echo "zipname=$ZIP" >> $GITHUB_OUTPUT
         id: pack
 
       - name: 上传 Ccache 调试日志
@@ -888,11 +823,10 @@ jobs:
           path: ${{ github.workspace }}/kernel_workspace/ccache.log
           archive: true
 
-      - name: 上传模块 zip 工件
+      - name: 上传模块 zip
         uses: actions/upload-artifact@v7
         with:
           name: wifi-usb-drivers
-          # archive:false 时只能给单个文件，所以 verify.txt 用单独一步传
           path: ${{ github.workspace }}/kernel_workspace/wifi_usb_drivers_*.zip
           archive: false
           if-no-files-found: error
