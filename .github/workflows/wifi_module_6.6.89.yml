@@ -729,8 +729,16 @@ jobs:
             for chip in RTL8192E RTL8812A RTL8821A RTL8723B RTL8814A RTL8703B RTL8723D RTL8188F RTL8822B RTL8821C; do
               sed -i "s/^CONFIG_${chip} = y/CONFIG_${chip} = n/" Makefile 2>/dev/null || true
             done
-            # 使用纯净内核源码树作为 KSRC
-            make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-                  KSRC="$WORKDIR/kernel_workspace/common"                  KCFLAGS="-O2 -Wno-error" 2>&1 | tail -25 || true
+            # 关键：内核是 O=out 外置构建，配置生成在 common/out/ 下。
+            # 驱动自带的 modules 目标只传 -C $(KSRC)，不带 O=，
+            # 内核会去源码根目录找 include/config/auto.conf 而报
+            # "Kernel configuration is invalid"。
+            # 所以这里直接调用内核构建系统并显式传 O=。
+            KOUT="$WORKDIR/kernel_workspace/common/out"
+            # 与内核编译用同一套 wrapper，保证编译器版本/参数一致，
+            # 否则 genksyms 算出的 CRC 可能与内核不匹配。
+            make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-                  CC="$WORKDIR/kernel_workspace/common/cc-wrapper"                  LD="$WORKDIR/kernel_workspace/common/ld-wrapper"                  HOSTLD=ld.lld LLVM=1                  -C "$WORKDIR/kernel_workspace/common" O="$KOUT"                  M="$WORKDIR/kernel_workspace/rtl8188eus"                  KCFLAGS="-O2 -Wno-error" modules 2>&1 | tail -40 || true
+
             echo ">>> 8188eu 编译结果:"
             ls -la 8188eu.ko 2>/dev/null || echo "  !! 未产出 8188eu.ko"
           else
