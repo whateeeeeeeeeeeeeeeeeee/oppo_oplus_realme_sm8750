@@ -778,6 +778,23 @@ jobs:
             fi
             echo
 
+            # 关键之六：让网卡支持移入容器自己的网络命名空间。
+            # 需求：容器改成 isolated 网络后，直接把 USB 无线网卡给容器用。
+            #       做法是 iw phy <phy> set netns <容器PID>，
+            #       但驱动没声明 WIPHY_FLAG_NETNS_OK，内核直接返回 -EOPNOTSUPP(-95)。
+            # 根因：rtl8188eus 里那句 flag 被一个 2.6.38~2.6.x 的版本区间包着，
+            #       6.6.89 上整块不编译 → flag 从来没设过。
+            if [ -f "$WORKDIR/ci/fix_netns.py" ]; then
+              python3 "$WORKDIR/ci/fix_netns.py" "$WORKDIR/kernel_workspace/rtl8188eus" || {
+                echo "  !! fix_netns.py 失败，终止"
+                exit 1
+              }
+            else
+              echo "  !! 找不到 ci/fix_netns.py，NETNS 支持未启用"
+              exit 1
+            fi
+            echo
+
             NSSYM="VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver"
             if ! grep -q "MODULE_IMPORT_NS" os_dep/linux/usb_intf.c; then
               echo 'MODULE_IMPORT_NS('"$NSSYM"');' >> os_dep/linux/usb_intf.c
@@ -806,9 +823,29 @@ jobs:
             # 另外 CONFIG_RTL8188E 决定 MODULE_NAME，也要一并传入。
             make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-                  CC="$WORKDIR/kernel_workspace/common/cc-wrapper"                  LD="$WORKDIR/kernel_workspace/common/ld-wrapper"                  HOSTLD=ld.lld LLVM=1                  CONFIG_RTL8188EU=m CONFIG_RTL8188E=y                  -C "$WORKDIR/kernel_workspace/common" O="$KOUT"                  M="$WORKDIR/kernel_workspace/rtl8188eus"                  KCFLAGS="-O2 -Wno-error" modules 2>&1 | tee /tmp/ak_build.log | tail -60 || true
 
+            # ⚠️ 这里必须看【完整日志】。
+            # 之前两次事故的教训：CI 只打印 tail -60，而
+            # "incompatible-function-pointer-types" 这类关键诊断出现在
+            # 中间行，被 tail 吞掉，导致问题一直被隐藏到真机 panic。
             echo ">>> 编译日志统计:"
+            echo "    完整日志行数: $(wc -l < /tmp/ak_build.log 2>/dev/null || echo 0)"
             echo "    CC 行数: $(grep -c 'CC .*rtl8188eus\|CC \[' /tmp/ak_build.log 2>/dev/null || echo 0)"
             echo "    error 数: $(grep -ci 'error' /tmp/ak_build.log 2>/dev/null || echo 0)"
+
+            echo ">>> 类型不匹配类诊断（KCFI 事故的直接前兆，必须为 0）:"
+            CRIT=$(grep -nE 'incompatible-function-pointer-types|incompatible pointer type|different type|conflicting types' /tmp/ak_build.log 2>/dev/null || true)
+            if [ -n "$CRIT" ]; then
+              echo "$CRIT" | head -40
+              echo "    !! 检出函数指针类型不匹配 —— 这正是前两次 CFI panic 的成因。"
+              echo "    !! 中止构建。"
+              exit 1
+            else
+              echo "    (无) ✅"
+            fi
+
+            echo ">>> 8188eu 编译全部 warning（便于提前发现隐患）:"
+            grep -n 'warning:' /tmp/ak_build.log 2>/dev/null | grep -i 'rtl8188eus' | head -30 || echo "    (无)"
+
             echo ">>> 最后 30 行原始日志:"
             tail -30 /tmp/ak_build.log 2>/dev/null || true
 
