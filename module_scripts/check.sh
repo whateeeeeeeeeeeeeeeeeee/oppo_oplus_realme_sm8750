@@ -103,9 +103,10 @@ echo
 echo "【5】固件"
 echo "────────────────────────────────────────────────────────"
 echo "  firmware_class.path = '$(cat /sys/module/firmware_class/parameters/path 2>/dev/null)'"
-for p in /lib/firmware/rtlwifi/rtl8188eufw.bin \
-         /vendor/firmware/rtlwifi/rtl8188eufw.bin \
-         /data/adb/modules/wifi_usb_drivers/firmware/rtlwifi/rtl8188eufw.bin; do
+echo "  （应为空或不含 wifi_usb_drivers；若含它说明是旧版残留，会让其它驱动读固件报 -13）"
+for p in /etc/firmware/rtlwifi/rtl8188eufw.bin \
+         /system/etc/firmware/rtlwifi/rtl8188eufw.bin \
+         /lib/firmware/rtlwifi/rtl8188eufw.bin; do
     if [ -f "$p" ]; then
         printf "  [有] %-58s %s 字节\n" "$p" "$(stat -c%s "$p" 2>/dev/null)"
     fi

@@ -33,8 +33,19 @@ sleep 3
 #   rtl8xxxu      依赖 mac80211/cfg80211     → 系统已加载
 #   rtl8187       依赖 mac80211/cfg80211/rfkill/eeprom_93cx6
 #   mt7601u       依赖 mac80211/cfg80211
+#
+# 【注意】rtl8xxxu 与 8188eu 抢同一块网卡，不能同时加载。
+# 如果用户已经手动切到 8188eu（monitor 模式），开机时【不要】再把
+# rtl8xxxu 装回去，否则会把网卡从 8188eu 手里抢走。
 # ---------------------------------------------------------------------------
-for m in eeprom_93cx6 rtl8xxxu rtl8187 mt7601u; do
+if grep -q "^8188eu " /proc/modules 2>/dev/null; then
+    echo "  检测到 8188eu 已加载（monitor 模式），跳过 rtl8xxxu，避免抢设备"
+    MODS="eeprom_93cx6 rtl8187 mt7601u"
+else
+    MODS="eeprom_93cx6 rtl8xxxu rtl8187 mt7601u"
+fi
+
+for m in $MODS; do
     f="$MODDIR/system/lib/modules/$m.ko"
     [ -f "$f" ] || continue
 

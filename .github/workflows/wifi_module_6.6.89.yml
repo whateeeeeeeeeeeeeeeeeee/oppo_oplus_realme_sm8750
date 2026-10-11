@@ -929,7 +929,7 @@ jobs:
           cd kernel_workspace
           M=wifi_module
           rm -rf "$M"
-          mkdir -p "$M/system/lib/modules" "$M/firmware/rtlwifi"
+          mkdir -p "$M/system/lib/modules" "$M/system/etc/firmware/rtlwifi"
 
           # 只打包手机上没有的四个模块。
           # 不打包 cfg80211/mac80211/rfkill/libarc4：
@@ -953,12 +953,29 @@ jobs:
             echo "  !! 8188eu.ko 缺失，monitor 功能不可用"
           fi
 
-          # RTL8188EU 固件（驱动向内核请求 rtlwifi/rtl8188eufw.bin）
+          # RTL8188EU 固件。
+          #
+          # 【重要】这里必须放进 system/etc/firmware/，不能放模块私有目录
+          # 再用 firmware_class.path 指过去。原因（已由 dmesg 实证）：
+          #
+          #   firmware_class.path 是【全局】内核参数，对所有驱动生效。
+          #   而 /data/adb 在 Android SELinux 下是 adb_data_file，
+          #   内核固件加载线程（kworker）无权读取 → 每次都是 -EACCES(-13)：
+          #
+          #     rtl8xxxu: loading /data/adb/modules/.../rtl8188eufw.bin failed with error -13
+          #     r8152:    loading /data/adb/modules/.../rtl8153b-2.fw   failed with error -13
+          #
+          #   ↑ 连【有线网卡】的固件都被这条路径拦掉了，属于副作用。
+          #
+          # Android 上 /etc -> /system/etc，而 ueventd 的固件搜索列表
+          # 第一项就是 /etc/firmware。KernelSU 会把模块的 system/ 覆盖到
+          # /system/，所以固件放 system/etc/firmware/rtlwifi/ 就能被找到，
+          # 且【不需要】修改任何全局参数。
           curl -sSL --retry 3 -o /tmp/fw.bin \
             https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtlwifi/rtl8188eufw.bin
           if [ -s /tmp/fw.bin ]; then
-            cp /tmp/fw.bin "$M/firmware/rtlwifi/rtl8188eufw.bin"
-            echo "固件 OK: $(stat -c%s /tmp/fw.bin) 字节"
+            cp /tmp/fw.bin "$M/system/etc/firmware/rtlwifi/rtl8188eufw.bin"
+            echo "固件 OK: $(stat -c%s /tmp/fw.bin) 字节 -> system/etc/firmware/rtlwifi/"
           else
             echo "!! 固件下载失败"; exit 1
           fi
@@ -972,6 +989,48 @@ jobs:
             echo "  [脚本] $s"
           done
           chmod 755 "$M/post-fs-data.sh" "$M/service.sh" "$M/customize.sh"
+
+          # ---- 打包自检：防止固件路径 bug 回归 ---------------------------
+          # 历史 bug：把固件放模块私有目录，再用 firmware_class.path 指过去。
+          # 那是【全局】内核参数，而 /data/adb 受 SELinux 保护，内核读不了，
+          # 导致设备上所有驱动请求固件都报 -EACCES(-13)（连有线网卡都被拖累）。
+          echo "=== 打包自检 ==="
+          fail=0
+
+          # 1. 固件必须在 system/etc/firmware/ 下
+          if [ ! -f "$M/system/etc/firmware/rtlwifi/rtl8188eufw.bin" ]; then
+            echo "  !! 固件不在 system/etc/firmware/rtlwifi/"; fail=1
+          else
+            echo "  ✅ 固件位置正确: system/etc/firmware/rtlwifi/rtl8188eufw.bin"
+          fi
+
+          # 2. 不允许存在旧的私有 firmware/ 目录
+          if [ -d "$M/firmware" ]; then
+            echo "  !! 残留旧的 firmware/ 私有目录"; fail=1
+          fi
+
+          # 3. 脚本里不允许再写 firmware_class.path 参数
+          #    （只允许读，读是 check.sh/service.sh 的诊断输出）
+          for s in post-fs-data.sh service.sh mode.sh; do
+            [ -f "$M/$s" ] || continue
+            if grep -qE '^[^#]*>[^>]*firmware_class/parameters/path|^[^#]*echo -n[^|]*>[^>]*parameters/path' "$M/$s"; then
+              echo "  !! $s 仍在写入 firmware_class.path（全局参数，会连累其它驱动）"; fail=1
+            fi
+          done
+          [ "$fail" = 0 ] && echo "  ✅ 固件路径自检通过（未使用全局内核参数）"
+
+          # 4. 脚本语法检查（设备上是 /system/bin/sh，这里用 bash 近似）
+          for s in post-fs-data.sh service.sh customize.sh mode.sh check.sh; do
+            if ! sh -n "$M/$s" 2>/dev/null; then
+              echo "  !! $s 语法错误"; fail=1
+            fi
+          done
+          [ "$fail" = 0 ] && echo "  ✅ 全部脚本语法通过"
+
+          if [ "$fail" != 0 ]; then
+            echo "!! 打包自检失败，终止（避免产出有隐患的包）"
+            exit 1
+          fi
 
           STAMP="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
           CODE="$(TZ=Asia/Shanghai date +%Y%m%d%H%M)"
