@@ -36,8 +36,22 @@ LOG=/data/local/tmp/bluetooth.log
 
 log() { echo "$@"; echo "$@" >> "$LOG" 2>/dev/null; }
 
-# 按依赖顺序
-ORDER="bluetooth rfcomm hidp hci_uart btqca"
+# 按依赖顺序加载。
+#
+# 【重要】顺序来自 `modinfo -F depends` 的权威数据，不能凭感觉排：
+#   bluetooth    depends: rfkill
+#   btbcm        depends: bluetooth
+#   btqca        depends: bluetooth
+#   rfcomm       depends: bluetooth
+#   hidp         depends: bluetooth
+#   hci_uart     depends: bluetooth,btbcm,btqca   ← 必须最后！
+#
+# 之前我把顺序写成 "bluetooth rfcomm hidp hci_uart btqca"，两个错误：
+#   1. btqca 排在 hci_uart 后面 → hci_uart 找不到 qca_* 符号
+#   2. btbcm 根本没在列表里     → hci_uart 找不到 btbcm_* 符号
+# 症状：insmod 报 "No such file or directory"，但文件其实在 ——
+# 真实错误是 Unknown symbol (err -2 = -ENOENT)，被 insmod 误报成文件不存在。
+ORDER="bluetooth btbcm btqca rfcomm hidp hci_uart"
 
 load_one() {
     m="$1"
