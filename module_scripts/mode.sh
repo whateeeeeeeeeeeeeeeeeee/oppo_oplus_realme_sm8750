@@ -11,9 +11,17 @@
 #    8188eu    — aircrack-ng 版，【支持 monitor + 帧注入】，用于抓包/监听
 #
 #  用法（root）：
-#    sh mode.sh status    查看当前用哪个
-#    sh mode.sh monitor   切到 8188eu（监听模式用这个）
-#    sh mode.sh normal    切回 rtl8xxxu（日常上网用这个）
+#    sh mode.sh status      查看当前用哪个
+#    sh mode.sh monitor     切到 8188eu（监听模式用这个）
+#    sh mode.sh monitor-on  切到 8188eu 并直接设成 monitor（省一步）
+#    sh mode.sh normal      切回 rtl8xxxu（日常上网用这个）
+#
+#  关于接口名（重要）：
+#    接口名存在【网络命名空间】里，不在进程里。手机和 Droidspaces 容器
+#    共用同一个 netns，所以名字只有一份，谁改两边都看到。
+#    内核先给默认名（wlan1），随后容器里的 systemd-udevd 异步改名成
+#    wlu1u3（wlu = wlan-over-USB + USB 总线/端口号）。
+#    本脚本会等名字【连续两次一致】再输出，避免打印一个马上要变的名字。
 # ============================================================================
 
 MODDIR=${0%/*}
@@ -117,10 +125,14 @@ case "${1:-status}" in
             #   改完之后再 ls 就是 wlu1u3 —— 这就是同一命令
             #   不同时候输出不同名字的原因（竞态，不是 bug 也不是随机）。
             #
-            # 做法：轮询直到接口名【连续两次相同】再输出。
+            # 做法（两段式，避免过早接受默认名）：
+            #   内核默认名:  wlan1 / eth0        ← udev 可能马上改掉，不可信
+            #   udev 预测名: wlu1u3 / enu1u4     ← 以 wl/en + 类型字母开头，是终态
+            #   1) 一旦看到 udev 风格的名字 → 立刻采用（终态）
+            #   2) 否则一直等到超时，再用最后看到的默认名兜底
             IF=""
             i=0
-            while [ $i -lt 20 ]; do
+            while [ $i -lt 24 ]; do
                 NEW=""
                 for n in /sys/class/net/*; do
                     _i=$(basename "$n")
@@ -130,10 +142,26 @@ case "${1:-status}" in
                     _l=$(readlink -f "$n/device" 2>/dev/null)
                     case "$_l" in *usb*) NEW="${NEW:+$NEW }$_i" ;; esac
                 done
-                if [ -n "$NEW" ] && [ "$NEW" = "$IF" ]; then
-                    break   # 连续两次一致，说明 udev 已经改完名
+
+                [ -n "$NEW" ] && IF="$NEW"
+
+                # 终态判定：udev 的可预测命名规则
+                #   wl<type><bus><port>  如 wlu1u3   (wlan over USB)
+                #   wlx<mac>             如 wlx488a... (无稳定槽位时按 MAC)
+                #   en<type><bus><port>  如 enu1u4   (ethernet over USB)
+                #   enx<mac>             如 enx6c1f... (同上)
+                # 这些不是内核默认名，说明 udev 已经处理完，不会再变。
+                _final=1
+                for _i in $NEW; do
+                    case "$_i" in
+                        wlu*|wlx*|enu*|enx*) : ;;
+                        *) _final=0 ;;
+                    esac
+                done
+                if [ -n "$NEW" ] && [ "$_final" = 1 ]; then
+                    break
                 fi
-                IF="$NEW"
+
                 sleep 0.5
                 i=$((i + 1))
             done
