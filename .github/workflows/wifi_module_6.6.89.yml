@@ -1080,21 +1080,29 @@ jobs:
             # 6. 加载顺序必须满足依赖（曾写错顺序导致 hci_uart 加载失败）
             #    从 .ko 里读 depends，验证脚本里的 ORDER 是拓扑序。
             #    校验逻辑放在 ci/check_bt_order.py，避免 heredoc 破坏 YAML 缩进。
+            #
+            # 注意路径：打包步骤开头 cd 进了 kernel_workspace，
+            # 所以 $WORKDIR/ci/... 是错的（$WORKDIR 是仓库根）。
+            # 用 $GITHUB_WORKSPACE 最稳妥。
             echo "  --- 校验加载顺序 ---"
-            if [ -f "$M/bluetooth.sh" ] && [ -f "$WORKDIR/ci/check_bt_order.py" ]; then
+            CBT="$GITHUB_WORKSPACE/ci/check_bt_order.py"
+            [ -f "$CBT" ] || CBT="../ci/check_bt_order.py"
+            if [ -f "$M/bluetooth.sh" ] && [ -f "$CBT" ]; then
               ORDER=$(grep -oE '^ORDER="[^"]+"' "$M/bluetooth.sh" | sed 's/ORDER="//;s/"//')
               if [ -z "$ORDER" ]; then
                 echo "  !! bluetooth.sh 里找不到 ORDER="; fail=1
               else
                 echo "  ORDER = $ORDER"
-                if python3 "$WORKDIR/ci/check_bt_order.py" "$M/bluetooth" "$ORDER"; then
+                if python3 "$CBT" "$M/bluetooth" "$ORDER"; then
                   echo "  ✅ 加载顺序满足全部依赖"
                 else
                   echo "  !! 加载顺序不满足依赖（见上）"; fail=1
                 fi
               fi
             else
-              echo "  !! 缺少 check_bt_order.py 或 bluetooth.sh"; fail=1
+              echo "  !! 缺少 check_bt_order.py 或 bluetooth.sh"
+              echo "     CBT=$CBT  存在=$([ -f "$CBT" ] && echo 是 || echo 否)"
+              fail=1
             fi
           else
             echo "  !! bluetooth/ 目录不存在"; fail=1
