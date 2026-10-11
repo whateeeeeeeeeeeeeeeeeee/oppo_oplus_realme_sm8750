@@ -714,6 +714,26 @@ jobs:
             fi
           done
 
+          # ---- 蓝牙模块 ----------------------------------------------------
+          # 手机内核有 CONFIG_BT=m 等配置，但【原厂没有提供这些 .ko 文件】，
+          # 而且 Android 系统分区里也找不到 → 蓝牙在内核侧根本没起来
+          # （表现为 /sys/class/bluetooth/ 为空、/sys/module/bluetooth 不存在，
+          #   即使 settings get global bluetooth_on = 1）。
+          #
+          # 既然本工作流本来就要跑一次 `make modules`，这些 .ko 顺手就编出来了
+          # （日志里可见 LD [M] net/bluetooth/bluetooth.ko），
+          # 之前只是【没收集】而已。现在一并打包。
+          #
+          # 加载顺序（依赖）：bluetooth → hci_uart → btqca
+          for w in bluetooth rfcomm hidp hci_uart btqca btbcm btsdio hci_vhci; do
+            f=$(find out -name "$w.ko" 2>/dev/null | head -1)
+            if [ -n "$f" ]; then
+              cp "$f" "$STAGE/"; echo "  [有] $w.ko  ($(stat -c%s "$f") 字节) [蓝牙]"
+            else
+              echo "  [无] $w.ko [蓝牙]"
+            fi
+          done
+
           echo "=========================================================="
           echo "  编译 aircrack-ng 8188eu (monitor + 帧注入)"
           echo "=========================================================="
@@ -943,6 +963,20 @@ jobs:
             fi
           done
 
+          # ---- 蓝牙模块：单独放，【不自动加载】------------------------------
+          # 原因：btqca/hci_uart 会接管 /dev/ttyMSM0 并给 BT 芯片上电。
+          # Android 的蓝牙 HAL 也可能在用那个串口，两边同时操作会打架。
+          # 所以默认不加载，需要时用 bluetooth.sh 手动开。
+          mkdir -p "$M/bluetooth"
+          BT_CNT=0
+          for x in bluetooth rfcomm hidp hci_uart btqca btbcm btsdio hci_vhci; do
+            if [ -f "wifi_stage/$x.ko" ]; then
+              cp "wifi_stage/$x.ko" "$M/bluetooth/"
+              BT_CNT=$((BT_CNT + 1))
+            fi
+          done
+          echo "  [蓝牙] 打包 $BT_CNT 个模块到 bluetooth/（默认不加载）"
+
           # 8188eu（monitor + 帧注入）与 rtl8xxxu 争同一硬件，不能同时加载。
           # 放到 independent/ 目录，由切换脚本启用，默认不加载。
           mkdir -p "$M/independent"
@@ -984,7 +1018,7 @@ jobs:
           SD="$(pwd)/../module_scripts"
           [ -d "$SD" ] || SD="$GITHUB_WORKSPACE/module_scripts"
           [ -d "$SD" ] || { echo "!! 找不到 module_scripts"; exit 1; }
-          for s in post-fs-data.sh service.sh customize.sh mode.sh check.sh; do
+          for s in post-fs-data.sh service.sh customize.sh mode.sh check.sh bluetooth.sh; do
             cp "$SD/$s" "$M/$s" || { echo "!! 缺少 $s"; exit 1; }
             echo "  [脚本] $s"
           done
@@ -1020,12 +1054,29 @@ jobs:
           [ "$fail" = 0 ] && echo "  ✅ 固件路径自检通过（未使用全局内核参数）"
 
           # 4. 脚本语法检查（设备上是 /system/bin/sh，这里用 bash 近似）
-          for s in post-fs-data.sh service.sh customize.sh mode.sh check.sh; do
+          for s in post-fs-data.sh service.sh customize.sh mode.sh check.sh bluetooth.sh; do
             if ! sh -n "$M/$s" 2>/dev/null; then
               echo "  !! $s 语法错误"; fail=1
             fi
           done
           [ "$fail" = 0 ] && echo "  ✅ 全部脚本语法通过"
+
+          # 5. 蓝牙模块必须打包齐（缺了蓝牙就用不了）
+          if [ -d "$M/bluetooth" ]; then
+            BTN=$(ls "$M/bluetooth"/*.ko 2>/dev/null | wc -l)
+            if [ "$BTN" -lt 5 ]; then
+              echo "  !! 蓝牙模块只打包了 $BTN 个（应 >=5）"; fail=1
+            else
+              echo "  ✅ 蓝牙模块 $BTN 个"
+              ls "$M/bluetooth"
+            fi
+            # 核心的 bluetooth.ko 必须有
+            [ -f "$M/bluetooth/bluetooth.ko" ] || { echo "  !! 缺 bluetooth.ko"; fail=1; }
+            [ -f "$M/bluetooth/hci_uart.ko" ] || { echo "  !! 缺 hci_uart.ko"; fail=1; }
+            [ -f "$M/bluetooth/btqca.ko" ]    || { echo "  !! 缺 btqca.ko"; fail=1; }
+          else
+            echo "  !! bluetooth/ 目录不存在"; fail=1
+          fi
 
           if [ "$fail" != 0 ]; then
             echo "!! 打包自检失败，终止（避免产出有隐患的包）"
